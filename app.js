@@ -1,5 +1,5 @@
 const DB_NAME='catalogPWA', DB_VERSION=1;
-let db, products=[], cart={}, orders=[], settings={supplier:'',buyer:''}, currentView='catalog', toastTimer;
+let db, products=[], cart={}, orders=[], settings={supplier:'',buyer:''}, currentView='catalog', toastTimer, selectedCategory='Все категории';
 const $=s=>document.querySelector(s);
 const money=n=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'RUB',maximumFractionDigits:2}).format(Number(n)||0);
 const fmtQty=n=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:3}).format(Number(n)||0);
@@ -16,7 +16,14 @@ function toast(msg){const el=$('#toast');el.textContent=msg;el.classList.add('sh
 async function init(){
  db=await openDB();
  const existing=await all('products');
- if(!existing.length){const r=await fetch('./catalog.json');const seed=await r.json();const t=db.transaction('products','readwrite');seed.forEach(p=>t.objectStore('products').put(p));await new Promise((res,rej)=>{t.oncomplete=res;t.onerror=rej;});}
+ // Load the refreshed seed every launch so existing installations receive category metadata too.
+ const r=await fetch('./catalog.json');const seed=await r.json();
+ if(!existing.length){const t=db.transaction('products','readwrite');seed.forEach(p=>t.objectStore('products').put(p));await new Promise((res,rej)=>{t.oncomplete=res;t.onerror=rej;});}
+ else{
+  const seedById=new Map(seed.map(p=>[p.id,p]));
+  const headings=new Set(['ЯЯ','БАКАЛЕЯ','БАТОНЧИКИ','БЫТОВЫЕ ТОВАРЫ','ВОДА','ЖЕВАТЕЛЬНАЯ РЕЗИНКА','ЗАЖИГАЛКИ','ЗАМОРОЗКА','ЗЕФИР','КАША,СУП,МИВИНА','КИНДЕР','КОЛБАСКИ','КОНДИТЕРСКИЕ ИЗДЕЛИЯ','КОНФЕТЫ В КОРОБКАХ','КОНФЕТЫ ВЕСОВЫЕ','КОРМ','КОФЕ','КРУПЫ ВЕСОВЫЕ','КРУПЫ ФАСОВКА','КУКУРУЗНЫЕ ПАЛОЧКИ','ЛЕДЕНЦЫ','ЛЕТО','МАЙОНЕЗ,КЕТЧУП,СОУС','МАКАРОНЫ','МОЛОЧНЫЕ ПРОДУКТЫ','МОРОЖЕНОЕ','НАША ФАСОВКА','НОВОГОДНИЕ ИГРУШКИ','НОВОГОДНИЕ ПОДАРКИ','НОВЫЙ ГОД','ПАКЕТЫ','ПАСХА','ПЕЧЕНЬЕ','ПЕЧЕНЬЕ В КОРРЕКСАХ','ПЕЧЕНЬЕ ВЕСОВОЕ','ПИВО','ПРЕСЕРВА','ПРИПРАВЫ','СМЕСЬ ПРИПРАВ','РАСТИТЕЛЬНОЕ МАСЛО','РЫБА','РЫБА К ПИВУ','РЫБНЫЕ КОНСЕРВЫ','СОКИ','СОЛЕНЬЯ','СУХИЕ ЗАВТРАКИ','СЫР ВЕСОВОЙ','ТОППИНГИ И СИРОПЫ','ХОТ ДОГ','ЧАЙ','ЧИПСЫ,СУХАРИКИ,ОРЕШКИ','ШОКОЛАД','ЭНЕРГЕТИКИ','ЯНЕНУЖНОЕ','ЯШКИНО']);
+  for(const p of existing){const seeded=seedById.get(p.id);if(seeded){p.category=seeded.category;await put('products',p)}else if(headings.has(String(p.name||'').trim().toUpperCase())){await del('products',p.id)}else if(!p.category){p.category='Без категории';await put('products',p)}}
+ }
  products=await all('products');cart=await loadState('cart',{});orders=await all('orders');settings=await loadState('settings',{supplier:'',buyer:''});
  $('#supplier').value=settings.supplier||'';$('#buyer').value=settings.buyer||'';
  renderAll();
@@ -32,25 +39,38 @@ function showView(v){currentView=v;document.querySelectorAll('.view').forEach(x=
 document.querySelectorAll('.nav').forEach(b=>b.addEventListener('click',()=>showView(b.dataset.view)));
 function renderCatalog(){
  const q=$('#search').value.trim().toLowerCase(), sf=$('#stockFilter').value, sort=$('#sort').value;
+ const categories=[...new Set(products.map(p=>p.category||'Без категории'))];
+ if(selectedCategory!=='Все категории'&&!categories.includes(selectedCategory))selectedCategory='Все категории';
+ const nav=$('#categoryNav');nav.innerHTML='';
+ const makeChip=(label,active)=>{const b=document.createElement('button');b.type='button';b.className='category-chip'+(active?' active':'');b.textContent=label;b.setAttribute('aria-pressed',active?'true':'false');b.addEventListener('click',()=>{selectedCategory=label;renderCatalog();});nav.append(b)};
+ makeChip('Все категории',selectedCategory==='Все категории');
+ categories.forEach(c=>makeChip(c,selectedCategory===c));
  let arr=products.filter(p=>p.name.toLowerCase().includes(q));
+ // Search is global; when the search field is empty, the selected category controls the view.
+ if(!q&&selectedCategory!=='Все категории')arr=arr.filter(p=>(p.category||'Без категории')===selectedCategory);
  arr=arr.filter(p=>{const a=available(p);if(sf==='available')return a!==null&&a>0;if(sf==='unknown')return a===null;if(sf==='zero')return a!==null&&a<=0;return true});
- arr.sort((a,b)=>sort==='priceAsc'?(a.price??Infinity)-(b.price??Infinity):sort==='priceDesc'?(b.price??-Infinity)-(a.price??-Infinity):sort==='stock'?(available(b)??-Infinity)-(available(a)??-Infinity):a.name.localeCompare(b.name,'ru'));
+ const cmp=(a,b)=>sort==='priceAsc'?(a.price??Infinity)-(b.price??Infinity):sort==='priceDesc'?(b.price??-Infinity)-(a.price??-Infinity):sort==='stock'?(available(b)??-Infinity)-(available(a)??-Infinity):a.name.localeCompare(b.name,'ru');
  const list=$('#catalogList');list.innerHTML='';$('#catalogEmpty').classList.toggle('hidden',arr.length>0);
- // Keep long catalogs responsive: render the first 250 results at a time.
- const shown=arr.slice(0,250);
- shown.forEach(p=>{
+ if(!arr.length)return;
+ // In category view, show a flat list of products; category navigation is a horizontal scroll strip.
+ arr.sort((a,b)=>{
+  if(q||selectedCategory!=='Все категории')return cmp(a,b);
+  const ca=categories.indexOf(a.category||'Без категории'),cb=categories.indexOf(b.category||'Без категории');
+  return ca-cb||cmp(a,b);
+ });
+ arr.slice(0,1000).forEach(p=>{
   const a=available(p), row=document.createElement('div');row.className='product';
   const thumb=document.createElement('div');thumb.className='thumb';
   if(p.photo){const im=document.createElement('img');im.src=p.photo;im.alt=p.name;im.style.cssText='width:100%;height:100%;object-fit:cover;border-radius:8px';thumb.append(im)}else thumb.textContent='Добавить фото';
   thumb.title='Нажмите, чтобы добавить или открыть фото';thumb.addEventListener('click',()=>photoAction(p));
-  const info=document.createElement('div');info.innerHTML=`<div class="pname"></div><div class="pmeta">Артикул: ${p.id}</div>`;info.querySelector('.pname').textContent=p.name;
+  const info=document.createElement('div');info.innerHTML='<div class="pname"></div><div class="pmeta"></div>';info.querySelector('.pname').textContent=p.name;info.querySelector('.pmeta').textContent=`${p.category||'Без категории'} · Артикул: ${p.id}`;
   const price=document.createElement('div');price.className='price';price.textContent=p.price==null?'Цена не указана':money(p.price);
   const stock=document.createElement('div');stock.className='stock '+(a===null?'':a>0?'good':'zero');stock.textContent=a===null?'Остаток не указан':`Доступно: ${fmtQty(a)}`;
   const add=document.createElement('div');add.className='addrow';const inp=document.createElement('input');inp.type='number';inp.min='0.001';inp.step='any';inp.value='1';inp.className='qtyinput';inp.setAttribute('aria-label','Количество');
   const btn=document.createElement('button');btn.className='primary addbtn';btn.textContent='В корзину';btn.addEventListener('click',()=>addToCart(p.id,inp.value));
   add.append(inp,btn);row.append(thumb,info,price,stock,add);list.append(row);
  });
- if(arr.length>250){const more=document.createElement('p');more.className='muted';more.textContent=`Показаны первые 250 из ${arr.length} результатов. Уточните поиск, чтобы быстрее найти товар.`;list.append(more)}
+ if(arr.length>1000){const more=document.createElement('p');more.className='muted';more.textContent=`Показаны первые 1000 из ${arr.length} товаров. Уточните поиск или выберите категорию.`;list.append(more)}
 }
 async function addToCart(id,raw){const p=productById(id),q=Number(raw);if(!p||!Number.isFinite(q)||q<=0){toast('Укажите корректное количество');return}const a=available(p);if(a!==null&&q>a+1e-9){toast(`Недостаточно остатка. Доступно: ${fmtQty(Math.max(0,a))}`);return}cart[id]=Number(cart[id]||0)+q;await saveState('cart',cart);renderAll();toast('Товар добавлен; остаток зарезервирован');}
 async function setCartQty(id,raw){const q=Number(raw),old=Number(cart[id]||0),p=productById(id);if(!p)return;if(!Number.isFinite(q)||q<=0){await removeCart(id);return}const a=available(p);const max=a===null?null:a+old;if(max!==null&&q>max){toast(`Доступно с учётом текущего резерва: ${fmtQty(max)}`);renderCart();return}cart[id]=q;await saveState('cart',cart);renderAll();}
@@ -92,16 +112,19 @@ function openInvoice(id){const o=orders.find(x=>x.id===id);if(!o)return;if(!o.in
  if(!(inv.items||[]).length)addInvoiceRow({productId:'',name:'',qty:1,price:0});
  $('#addInvRow').addEventListener('click',()=>addInvoiceRow({productId:'',name:'',qty:1,price:0}));
  $('#saveInvoice').addEventListener('click',async()=>{o.invoice={supplier:$('#invSupplier').value,buyer:$('#invBuyer').value,releasedBy:$('#invReleased').value,receivedBy:$('#invReceived').value,items:[...body.querySelectorAll('tr')].map(readInvoiceRow)};o.supplier=o.invoice.supplier;o.buyer=o.invoice.buyer;await put('orders',o);orders=await all('orders');settings.supplier=o.invoice.supplier;settings.buyer=o.invoice.buyer;await saveState('settings',settings);renderOrders();toast('Накладная сохранена');});
- $('#printInvoice').addEventListener('click',()=>{saveInvoiceQuiet(o).then(()=>window.print())});
+ $('#printInvoice').addEventListener('click',()=>{saveInvoiceQuiet(o).then(()=>{prepareInvoicePrint();window.print()})});
  $('#shareInvoice').addEventListener('click',async()=>{const text=invoiceText(o);if(navigator.share){try{await navigator.share({title:'Накладная '+o.id,text})}catch(e){}}else{await navigator.clipboard?.writeText(text);toast('Текст накладной скопирован, если браузер разрешил копирование')}});
  recalcInvoice();
 }
-function addInvoiceRow(item){const body=$('#invRows'),tr=document.createElement('tr');tr.innerHTML=`<td class="idx"></td><td><input class="itemname" aria-label="Товар"></td><td><input class="qty right" type="number" step="any" min="0" aria-label="Количество"></td><td><input class="price right" type="number" step="any" min="0" aria-label="Цена"></td><td class="sum right">0,00</td><td class="no-print"><button class="danger rowdel">×</button></td>`;
- tr.querySelector('.itemname').value=item.name||'';tr.querySelector('.qty').value=item.qty??1;tr.querySelector('.price').value=item.price??0;
- tr.querySelectorAll('input').forEach(inp=>inp.addEventListener('input',recalcInvoice));tr.querySelector('.rowdel').addEventListener('click',()=>{tr.remove();recalcInvoice()});body.append(tr);recalcInvoice()}
+function addInvoiceRow(item){const body=$('#invRows'),tr=document.createElement('tr');tr.innerHTML=`<td class="idx"></td><td><div class="itemname-wrap"><textarea class="itemname" rows="2" aria-label="Полное наименование товара" spellcheck="false"></textarea><span class="itemname-print"></span></div></td><td><input class="qty right" type="number" step="any" min="0" aria-label="Количество"></td><td><input class="price right" type="number" step="any" min="0" aria-label="Цена"></td><td class="sum right">0,00</td><td class="no-print"><button class="danger rowdel">×</button></td>`;
+ const nameField=tr.querySelector('.itemname');nameField.value=item.name||'';nameField.style.height='auto';requestAnimationFrame(()=>{nameField.style.height=Math.max(48,nameField.scrollHeight+2)+'px'});tr.querySelector('.qty').value=item.qty??1;tr.querySelector('.price').value=item.price??0;
+ tr.querySelectorAll('input,textarea').forEach(inp=>inp.addEventListener('input',()=>{if(inp.classList.contains('itemname')){inp.style.height='auto';inp.style.height=Math.max(48,inp.scrollHeight+2)+'px'}recalcInvoice()}));tr.querySelector('.rowdel').addEventListener('click',()=>{tr.remove();recalcInvoice()});body.append(tr);recalcInvoice()}
 function readInvoiceRow(tr){return {productId:'',name:tr.querySelector('.itemname').value,qty:Number(tr.querySelector('.qty').value)||0,price:Number(tr.querySelector('.price').value)||0}}
 function recalcInvoice(){const rows=[...($('#invRows')?.querySelectorAll('tr')||[])];let total=0;rows.forEach((tr,i)=>{tr.querySelector('.idx').textContent=i+1;const q=Number(tr.querySelector('.qty').value)||0,p=Number(tr.querySelector('.price').value)||0,s=q*p;total+=s;tr.querySelector('.sum').textContent=new Intl.NumberFormat('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2}).format(s)});if($('#invTotal'))$('#invTotal').textContent=money(total);if($('#invCount'))$('#invCount').textContent=rows.filter(tr=>tr.querySelector('.itemname').value.trim()).length;if($('#invTotalText'))$('#invTotalText').textContent=money(total);if($('#invWords'))$('#invWords').textContent=numberWordsRub(total)}
 async function saveInvoiceQuiet(o){o.invoice={supplier:$('#invSupplier').value,buyer:$('#invBuyer').value,releasedBy:$('#invReleased').value,receivedBy:$('#invReceived').value,items:[...$('#invRows').querySelectorAll('tr')].map(readInvoiceRow)};await put('orders',o);orders=await all('orders');}
+function prepareInvoicePrint(){document.querySelectorAll('#invRows tr').forEach(tr=>{const input=tr.querySelector('.itemname'),span=tr.querySelector('.itemname-print');if(input&&span)span.textContent=input.value});document.body.classList.add('printing-invoice')}
+window.addEventListener('afterprint',()=>document.body.classList.remove('printing-invoice'));
+
 function invoiceText(o){const i=o.invoice||{},items=i.items||o.items||[];let lines=[`НАКЛАДНАЯ ${o.id}`,`Поставщик: ${i.supplier||''}`,`Покупатель: ${i.buyer||''}`,'№ | Товар | Количество | Цена | Сумма'];items.forEach((x,n)=>lines.push(`${n+1} | ${x.name} | ${x.qty} | ${money(x.price)} | ${money(x.qty*x.price)}`));const total=items.reduce((s,x)=>s+(Number(x.qty)||0)*(Number(x.price)||0),0);lines.push(`Итого: ${money(total)}`,'В том числе НДС: 0',`Всего наименований: ${items.filter(x=>x.name).length}, на сумму ${money(total)}`,numberWordsRub(total),`Кто отпустил товар: ${i.releasedBy||''}`,`Кто получил: ${i.receivedBy||''}`);return lines.join('\\n')}
 function numberWordsRub(amount){const n=Math.round((Number(amount)||0)*100),rub=Math.floor(n/100),kop=n%100;return `Итого: ${integerWords(rub)} ${rubDecl(rub)} ${String(kop).padStart(2,'0')} ${kopDecl(kop)}`.replace(/\\s+/g,' ').trim()}
 function integerWords(n){if(n===0)return 'ноль';const onesM=['','один','два','три','четыре','пять','шесть','семь','восемь','девять'],onesF=['','одна','две','три','четыре','пять','шесть','семь','восемь','девять'],teens=['десять','одиннадцать','двенадцать','тринадцать','четырнадцать','пятнадцать','шестнадцать','семнадцать','восемнадцать','девятнадцать'],tens=['','','двадцать','тридцать','сорок','пятьдесят','шестьдесят','семьдесят','восемьдесят','девяносто'],hundreds=['','сто','двести','триста','четыреста','пятьсот','шестьсот','семьсот','восемьсот','девятьсот'];function tri(v,f){let a=[];if(Math.floor(v/100))a.push(hundreds[Math.floor(v/100)]);let r=v%100;if(r>=10&&r<20)a.push(teens[r-10]);else{if(Math.floor(r/10))a.push(tens[Math.floor(r/10)]);let u=r%10;if(u)a.push((f?onesF:onesM)[u])}return a.join(' ')}let out=[];let mil=Math.floor(n/1e6),th=Math.floor(n/1000)%1000,rest=n%1000;if(mil)out.push(tri(mil,false),plural(mil,'миллион','миллиона','миллионов'));if(th)out.push(tri(th,true),plural(th,'тысяча','тысячи','тысяч'));if(rest)out.push(tri(rest,false));return out.join(' ')}
@@ -110,10 +133,40 @@ function rubDecl(n){return plural(n,'рубль','рубля','рублей')}fu
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function photoAction(p){if(p.photo){openModal(`<h2>${esc(p.name)}</h2><img src="${p.photo}" alt="" style="display:block;max-width:100%;max-height:65vh;margin:auto"><div class="invoice-buttons"><button id="replacePhoto" class="primary">Заменить фото</button><button id="removePhoto" class="danger">Удалить фото</button></div>`);$('#replacePhoto').onclick=()=>pickPhoto(p);$('#removePhoto').onclick=async()=>{p.photo=null;await put('products',p);products=await all('products');closeModal();renderCatalog()};}else pickPhoto(p)}
 function pickPhoto(p){const input=document.createElement('input');input.type='file';input.accept='image/*';input.onchange=async()=>{const file=input.files[0];if(!file)return;if(file.size>6*1024*1024){toast('Фото больше 6 МБ. Выберите файл меньшего размера.');return}const data=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file)});p.photo=data;await put('products',p);products=await all('products');closeModal();renderCatalog();toast('Фото сохранено на этом устройстве')};input.click()}
-$('#search').addEventListener('input',renderCatalog);$('#stockFilter').addEventListener('change',renderCatalog);$('#sort').addEventListener('change',renderCatalog);
+$('#search').addEventListener('input',()=>{if($('#search').value.trim())selectedCategory='Все категории';renderCatalog()});$('#stockFilter').addEventListener('change',renderCatalog);$('#sort').addEventListener('change',renderCatalog);
 $('#saveParties').addEventListener('click',async()=>{settings.supplier=$('#supplier').value;settings.buyer=$('#buyer').value;await saveState('settings',settings);toast('Реквизиты сохранены')});
 function parseExcel(file,skipRows){return new Promise((resolve,reject)=>{if(!window.XLSX){reject(new Error('Библиотека Excel не загрузилась. Подключитесь к интернету и обновите страницу.'));return}const reader=new FileReader();reader.onload=e=>{try{let wb=XLSX.read(e.target.result,{type:'array'}),ws=wb.Sheets[wb.SheetNames[0]],rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:null});resolve(rows.slice(skipRows))}catch(err){reject(err)}};reader.onerror=reject;reader.readAsArrayBuffer(file)})}
-$('#importPrice').addEventListener('click',async()=>{const f=$('#priceImport').files[0];if(!f){toast('Сначала выберите файл прайс-листа');return}try{const rows=await parseExcel(f,4);let count=0,added=0;for(const row of rows){const name=String(row[0]??'').trim().replace(/\s+/g,' ');if(!name||/^итого$/i.test(name))continue;const raw=row[1],price=raw===null||raw===''?null:Number(raw);let p=products.find(x=>norm(x.name)===norm(name));if(p){p.price=Number.isFinite(price)?price:null;count++}else{p={id:'p-'+Date.now()+'-'+Math.random().toString(36).slice(2,7),name,norm:norm(name),price:Number.isFinite(price)?price:null,stockTotal:null,stockName:null,stockMatch:'not_found',photo:null};products.push(p);added++}await put('products',p)}products=await all('products');renderAll();$('#importStatus').textContent=`Прайс-лист обработан: обновлено ${count}, добавлено новых товаров ${added}.`;toast('Импорт цен завершён')}catch(e){$('#importStatus').textContent='Ошибка импорта: '+e.message;toast('Не удалось импортировать прайс-лист')}});
+const PRICE_CATEGORIES=new Set(['ЯЯ','БАКАЛЕЯ','БАТОНЧИКИ','БЫТОВЫЕ ТОВАРЫ','ВОДА','ЖЕВАТЕЛЬНАЯ РЕЗИНКА','ЗАЖИГАЛКИ','ЗАМОРОЗКА','ЗЕФИР','КАША,СУП,МИВИНА','КИНДЕР','КОЛБАСКИ','КОНДИТЕРСКИЕ ИЗДЕЛИЯ','КОНФЕТЫ В КОРОБКАХ','КОНФЕТЫ ВЕСОВЫЕ','КОРМ','КОФЕ','КРУПЫ ВЕСОВЫЕ','КРУПЫ ФАСОВКА','КУКУРУЗНЫЕ ПАЛОЧКИ','ЛЕДЕНЦЫ','ЛЕТО','МАЙОНЕЗ,КЕТЧУП,СОУС','МАКАРОНЫ','МОЛОЧНЫЕ ПРОДУКТЫ','МОРОЖЕНОЕ','НАША ФАСОВКА','НОВОГОДНИЕ ИГРУШКИ','НОВОГОДНИЕ ПОДАРКИ','НОВЫЙ ГОД','ПАКЕТЫ','ПАСХА','ПЕЧЕНЬЕ','ПЕЧЕНЬЕ В КОРРЕКСАХ','ПЕЧЕНЬЕ ВЕСОВОЕ','ПИВО','ПРЕСЕРВА','ПРИПРАВЫ','СМЕСЬ ПРИПРАВ','РАСТИТЕЛЬНОЕ МАСЛО','РЫБА','РЫБА К ПИВУ','РЫБНЫЕ КОНСЕРВЫ','СОКИ','СОЛЕНЬЯ','СУХИЕ ЗАВТРАКИ','СЫР ВЕСОВОЙ','ТОППИНГИ И СИРОПЫ','ХОТ ДОГ','ЧАЙ','ЧИПСЫ,СУХАРИКИ,ОРЕШКИ','ШОКОЛАД','ЭНЕРГЕТИКИ','ЯНЕНУЖНОЕ','ЯШКИНО']);
+function priceKey(value){return String(value??'').normalize('NFKC').toLowerCase().replace(/ё/g,'е').replace(/[“”„”«»]/g,'').replace(/[–—−]/g,'-').replace(/,\s*(?:\d+\s*)?(?:шт|штук|кг|г|гр|л|упак\.?|уп|мешок|бл|бут|кор|пач|бан|ящ|рул|пакет)\.?\s*$/i,'').replace(/[^a-zа-я0-9]+/gi,' ').replace(/\s+/g,' ').trim()}
+function parsePriceValue(raw){if(raw===null||raw===undefined||String(raw).trim()==='')return null;if(typeof raw==='number')return Number.isFinite(raw)?raw:NaN;const cleaned=String(raw).replace(/[\s\u00a0]/g,'').replace(/[₽руб.]/gi,'').replace(',','.');const n=Number(cleaned);return Number.isFinite(n)?n:NaN}
+function newProductId(prefix='p'){return prefix+'-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,9)}
+$('#importPrice').addEventListener('click',async()=>{
+ const f=$('#priceImport').files[0];if(!f){toast('Сначала выберите файл прайс-листа');return}
+ const btn=$('#importPrice');btn.disabled=true;btn.textContent='Импортируем…';$('#importStatus').textContent='Проверяем прайс-лист…';
+ try{
+  const rows=await parseExcel(f,4);let category='Без категории';const parsed=[];let namedRows=0,validPriceRows=0;
+  for(const row of rows){const name=String(row?.[0]??'').trim().replace(/\s+/g,' ');if(!name||/^итого$/i.test(name))continue;const upper=name.toUpperCase();if(PRICE_CATEGORIES.has(upper)){category=upper==='ЯЯ'?'Без категории':upper;continue}const raw=row?.[1],price=parsePriceValue(raw);namedRows++;if(price===null||Number.isFinite(price))validPriceRows++;parsed.push({name,price,category,priceInvalid:Number.isNaN(price)})}
+  if(namedRows<5||validPriceRows<5)throw new Error('Не удалось распознать структуру прайс-листа. Проверьте, что выбран Excel-файл с товарами и ценами, а не остатки или другой документ. Каталог не изменён.');
+  // Index every existing product. Exact normalized names take priority; package-suffix variants are a fallback.
+  const exactIndex=new Map(),looseIndex=new Map();
+  const indexAdd=(map,key,p)=>{if(!key)return;const a=map.get(key)||[];a.push(p);map.set(key,a)};
+  const reindex=()=>{exactIndex.clear();looseIndex.clear();for(const p of products){indexAdd(exactIndex,norm(p.name),p);indexAdd(looseIndex,priceKey(p.name),p)}};reindex();
+  let updatedRows=0,updatedRecords=0,added=0,ambiguous=0,invalidPrice=0,blankPrice=0;const updatedIds=new Set();
+  for(const item of parsed){if(item.priceInvalid){invalidPrice++;continue}if(item.price===null)blankPrice++;
+   const exact=exactIndex.get(norm(item.name))||[];let matches=exact;
+   if(!matches.length){const loose=looseIndex.get(priceKey(item.name))||[];const identities=new Set(loose.map(p=>norm(p.name)));if(identities.size>1){ambiguous++;continue}matches=loose}
+   if(matches.length){for(const p of matches){p.price=item.price;p.category=item.category;p.norm=norm(p.name);await put('products',p);if(!updatedIds.has(p.id)){updatedIds.add(p.id);updatedRecords++}}updatedRows++;
+   }else{
+    // No matching product: add a new entry once. Never overwrite stock/photo/order data on existing records.
+    const p={id:newProductId(),name:item.name,norm:norm(item.name),price:item.price,category:item.category,stockTotal:null,stockName:null,stockMatch:'not_found',photo:null};products.push(p);await put('products',p);indexAdd(exactIndex,norm(p.name),p);indexAdd(looseIndex,priceKey(p.name),p);added++;
+   }
+  }
+  products=await all('products');renderAll();
+  const unmatched=added+ambiguous;
+  $('#importStatus').textContent=`Прайс «${f.name}» успешно обработан. Обновлено строк: ${updatedRows}; обновлено существующих записей: ${updatedRecords}; добавлено новых товаров: ${added}; без однозначного совпадения: ${unmatched}${ambiguous?` (неоднозначных строк пропущено: ${ambiguous})`:''}; строк с некорректной ценой пропущено: ${invalidPrice}; пустых цен: ${blankPrice}. Товары, которых нет в файле, не удалялись; остатки, фотографии и заказы сохранены.`;
+  toast(`Прайс загружен: обновлено ${updatedRecords}, добавлено ${added}`);
+ }catch(e){$('#importStatus').textContent='Импорт не выполнен: '+e.message;toast('Импорт не выполнен. Каталог не был намеренно очищен.')}finally{btn.disabled=false;btn.textContent='Импортировать цены'}
+});
 $('#importStock').addEventListener('click',async()=>{const f=$('#stockImport').files[0];if(!f){toast('Сначала выберите файл остатков');return}try{const rows=await parseExcel(f,3);let count=0,addedStock=0,unknown=0;for(const row of rows){const name=String(row[0]??'').trim().replace(/\s+/g,' ');if(!name||/^итого$/i.test(name)||/^магазин розница1$/i.test(name))continue;const raw=row[1],qty=raw===null||raw===''?null:Number(raw);let p=products.find(x=>norm(x.name)===norm(name)||norm(x.name)===norm(name.replace(/,\s*[^,]+$/,'')));if(!p){p=products.find(x=>norm(name).startsWith(norm(x.name))||norm(x.name).startsWith(norm(name)));}if(p){p.stockTotal=Number.isFinite(qty)?qty:null;p.stockName=name;p.stockMatch=p.stockTotal===null?'matched_unknown':'matched';count++;if(p.stockTotal===null)unknown++}else{products.push({id:'s-'+Date.now()+'-'+Math.random().toString(36).slice(2,7),name,norm:norm(name),price:null,stockTotal:Number.isFinite(qty)?qty:null,stockName:name,stockMatch:Number.isFinite(qty)?'matched':'matched_unknown',photo:null});addedStock++}await put('products',p)}products=await all('products');renderAll();$('#importStatus').textContent=`Остатки обработаны: обновлено ${count}, новых позиций из остатков ${addedStock}, без количества ${unknown}.`;toast('Импорт остатков завершён')}catch(e){$('#importStatus').textContent='Ошибка импорта: '+e.message;toast('Не удалось импортировать остатки')}});
 $('#exportBackup').addEventListener('click',async()=>{const data={version:1,exportedAt:new Date().toISOString(),products:await all('products'),cart:await loadState('cart',{}),orders:await all('orders'),settings:await loadState('settings',{supplier:'',buyer:''})};const blob=new Blob([JSON.stringify(data)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='catalog-backup-'+new Date().toISOString().slice(0,10)+'.json';a.click();URL.revokeObjectURL(a.href);toast('Резервная копия подготовлена')});
 $('#importBackup').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;try{const data=JSON.parse(await f.text());if(!data.products||!data.orders)throw new Error('Неверный формат файла');if(!confirm('Восстановление заменит текущий каталог, корзину и заказы. Продолжить?'))return;const t=db.transaction(['products','orders','state'],'readwrite');t.objectStore('products').clear();data.products.forEach(p=>t.objectStore('products').put(p));t.objectStore('orders').clear();data.orders.forEach(o=>t.objectStore('orders').put(o));t.objectStore('state').put({key:'cart',value:data.cart||{}});t.objectStore('state').put({key:'settings',value:data.settings||{supplier:'',buyer:''}});await new Promise((res,rej)=>{t.oncomplete=res;t.onerror=rej});products=await all('products');orders=await all('orders');cart=data.cart||{};settings=data.settings||{supplier:'',buyer:''};$('#supplier').value=settings.supplier||'';$('#buyer').value=settings.buyer||'';renderAll();toast('Резервная копия восстановлена')}catch(err){toast('Ошибка восстановления: '+err.message)}e.target.value=''});
