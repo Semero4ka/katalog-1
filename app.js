@@ -280,7 +280,7 @@ $('#importStock').addEventListener('click',async()=>{
  const btn=$('#importStock');btn.disabled=true;btn.textContent='Проверяем…';$('#importStatus').textContent='Читаем столбец «Итого» и проверяем соответствия товаров…';
  try{
   const report=await parseStockExcel(f),parsed=report.items;
-  if(parsed.length<5)throw new Error('Не удалось распознать таблицу остатков: слишком мало товарных строк. Старые остатки не изменены.');
+  if(!parsed.length)throw new Error('В файле не найдено товарных строк. Старые остатки не изменены.');
   const current=await all('products');
   const byExact=new Map(),byLoose=new Map();
   const addIndex=(map,key,p)=>{if(!key)return;const a=map.get(key)||[];a.push(p);map.set(key,a)};
@@ -288,37 +288,38 @@ $('#importStock').addEventListener('click',async()=>{
   let matchedExact=0,matchedNormalized=0,unmatched=0,ambiguous=0,duplicateRows=0;
   const used=new Set(),assignments=[],unmatchedRows=[],ambiguousRows=[],duplicateItems=[],invalidQtyRows=[];
   for(const item of parsed){
-   if(!item.qtyValid){invalidQtyRows.push(item);continue}
    let candidates=byExact.get(stockExactKey(item.name))||[],mode='exact';
    if(!candidates.length){candidates=byLoose.get(priceKey(item.name))||[];mode='normalized'}
    candidates=stockCandidatesForCategory(candidates,item.category);
+   // Строки остатков, которых нет в прайсе/каталоге, намеренно пропускаются
+   // целиком: их количество и формат не влияют на импорт каталожных товаров.
+   if(!candidates.length){unmatched++;unmatchedRows.push(item);continue}
+   if(!item.qtyValid){invalidQtyRows.push(item);continue}
    if(candidates.length===1){const p=candidates[0];if(used.has(String(p.id))){duplicateRows++;duplicateItems.push({...item,productName:p.name});continue}used.add(String(p.id));assignments.push({product:p,item,mode});if(mode==='exact')matchedExact++;else matchedNormalized++}
-   else if(candidates.length>1){ambiguous++;ambiguousRows.push({...item,candidates:candidates.slice(0,4).map(p=>p.name)})}
-   else{unmatched++;unmatchedRows.push(item)}
+   else{ambiguous++;ambiguousRows.push({...item,candidates:candidates.slice(0,4).map(p=>p.name)})}
   }
   const matched=assignments.length;
-  if(matched<5)throw new Error(`Найдено только ${matched} однозначных совпадений из ${parsed.length} товарных строк. Старые остатки не изменены. Проверьте названия товаров в прайсе и файле остатков.`);
-  const positiveUnmatched=unmatchedRows.filter(x=>Number(x.qty)>0),positiveAmbiguous=ambiguousRows.filter(x=>Number(x.qty)>0),positiveDuplicates=duplicateItems.filter(x=>Number(x.qty)>0);
+  const positiveAmbiguous=ambiguousRows.filter(x=>Number(x.qty)>0),positiveDuplicates=duplicateItems.filter(x=>Number(x.qty)>0);
   const blockers=[];
-  if(invalidQtyRows.length)blockers.push(`нечисловых значений «Итого»: ${invalidQtyRows.length}`);
-  if(positiveUnmatched.length)blockers.push(`не найдено в каталоге строк с ненулевым остатком: ${positiveUnmatched.length}`);
+  if(invalidQtyRows.length)blockers.push(`некорректных значений «Итого» у найденных товаров: ${invalidQtyRows.length}`);
   if(positiveAmbiguous.length)blockers.push(`неоднозначных совпадений с ненулевым остатком: ${positiveAmbiguous.length}`);
   if(positiveDuplicates.length)blockers.push(`повторных строк с ненулевым остатком: ${positiveDuplicates.length}`);
   if(blockers.length){
-   const examples=[...positiveUnmatched.slice(0,5).map(x=>`Не найдено: ${x.name} — ${fmtQty(x.qty)}`),...positiveAmbiguous.slice(0,5).map(x=>`Несколько вариантов: ${x.name} — ${fmtQty(x.qty)} (например: ${x.candidates.join('; ')})`),...positiveDuplicates.slice(0,5).map(x=>`Повтор: ${x.name} — ${fmtQty(x.qty)}`),...invalidQtyRows.slice(0,5).map(x=>`Некорректное «Итого»: ${x.name}`)];
-   $('#importStatus').textContent=`Импорт остановлен. Остатки НЕ изменены. В столбце «Итого» обнаружено: ${blockers.join('; ')}.\n${examples.join('\n')}${examples.length?'\n':''}Исправьте названия/значения в Excel или каталог и повторите импорт.`;
-   toast('Обнаружены ошибки сопоставления. Остатки не изменены');return;
+   const examples=[...positiveAmbiguous.slice(0,5).map(x=>`Несколько вариантов: ${x.name} — ${fmtQty(x.qty)} (например: ${x.candidates.join('; ')})`),...positiveDuplicates.slice(0,5).map(x=>`Повтор: ${x.name} — ${fmtQty(x.qty)}`),...invalidQtyRows.slice(0,5).map(x=>`Некорректное «Итого»: ${x.name}`)];
+   $('#importStatus').textContent=`Импорт остановлен. Остатки НЕ изменены. В столбце «Итого» обнаружено: ${blockers.join('; ')}.\n${examples.join('\n')}${examples.length?'\n':''}Исправьте неоднозначные совпадения или значения количества и повторите импорт. Строки товаров, отсутствующих в каталоге, не являются ошибкой и будут пропущены.`;
+   toast('Проверьте неоднозначные позиции и значения остатков');return;
   }
+  if(matched===0)throw new Error('Не найдено ни одного однозначного товара с корректным количеством в текущем каталоге. Старые остатки не изменены. Проверьте выбранный файл, названия и значения в столбце «Итого».');
   const emptyQty=report.emptyQty;
-  const confirmText=`Файл: ${f.name}. Источник количества: столбец «Итого». Строк товаров: ${parsed.length}. Однозначно сопоставлено: ${matched} (точных ${matchedExact}, после нормализации ${matchedNormalized}). Не найдено строк: ${unmatched}; неоднозначных строк: ${ambiguous}; повторных строк: ${duplicateRows}; пустых значений «Итого» (будут считаться нулём): ${emptyQty}; пропущено заголовков категорий: ${report.skippedGroups}. Все текущие остатки будут заменены этим снимком; товары, отсутствующие в файле, получат 0. Продолжить?`;
+  const confirmText=`Файл: ${f.name}. Источник количества: столбец «Итого». Строк товаров: ${parsed.length}. Однозначно сопоставлено: ${matched} (точных ${matchedExact}, после нормализации ${matchedNormalized}). Строк из файла, которых нет в прайсе/каталоге и которые будут проигнорированы: ${unmatched}; неоднозначных строк: ${ambiguous}; повторных строк: ${duplicateRows}; пустых значений «Итого» (будут считаться нулём): ${emptyQty}; пропущено заголовков категорий: ${report.skippedGroups}. Все текущие остатки будут заменены этим снимком; товары из прайса, отсутствующие в файле остатков, получат 0. Продолжить?`;
   if(!confirm(confirmText)){ $('#importStatus').textContent='Импорт отменён. Остатки не изменены.';return; }
   const updated=current.map(p=>({...p,stockTotal:0,stockName:null,stockMatch:'not_in_stock_file'}));
   const updatedById=new Map(updated.map(p=>[String(p.id),p]));
   for(const {product,item,mode} of assignments){const p=updatedById.get(String(product.id));p.stockTotal=item.qty;p.stockName=item.name;p.stockMatch=item.qtyEmpty?'matched_empty':mode==='exact'?'matched':'matched_normalized'}
   await new Promise((resolve,reject)=>{const t=db.transaction('products','readwrite');const store=t.objectStore('products');store.clear();updated.forEach(p=>store.put(p));t.oncomplete=resolve;t.onerror=()=>reject(t.error);t.onabort=()=>reject(t.error||new Error('Операция замены остатков отменена'))});
   products=await all('products');renderAll();
-  const zeroUnmatched=unmatchedRows.length-positiveUnmatched.length,zeroAmbiguous=ambiguousRows.length-positiveAmbiguous.length;
-  $('#importStatus').textContent=`Остатки обновлены из файла «${f.name}». Использован столбец «Итого». Совпало: ${matched} (точных ${matchedExact}, нормализованных ${matchedNormalized}); не найдено строк с нулевым количеством: ${zeroUnmatched}; неоднозначных строк с нулевым количеством: ${zeroAmbiguous}; повторных строк с нулевым количеством: ${duplicateItems.length-positiveDuplicates.length}; пустых значений «Итого» установлено в 0: ${emptyQty}; пропущено заголовков категорий: ${report.skippedGroups}. Товары каталога, отсутствующие в файле, получили остаток 0.`;
+  const ignoredAmbiguous=ambiguousRows.length-positiveAmbiguous.length,ignoredDuplicates=duplicateItems.length-positiveDuplicates.length;
+  $('#importStatus').textContent=`Остатки обновлены из файла «${f.name}». Использован столбец «Итого». Совпало: ${matched} (точных ${matchedExact}, нормализованных ${matchedNormalized}); проигнорировано строк, которых нет в прайсе/каталоге: ${unmatched}; неоднозначных строк с нулевым количеством пропущено: ${ignoredAmbiguous}; повторных строк с нулевым количеством пропущено: ${ignoredDuplicates}; пустых значений «Итого» установлено в 0: ${emptyQty}; пропущено заголовков категорий: ${report.skippedGroups}. Товары каталога, отсутствующие в файле остатков, получили остаток 0.`;
   toast(`Остатки обновлены по столбцу «Итого»: ${matched} совпадений`);
  }catch(e){console.error('Ошибка импорта остатков',e);$('#importStatus').textContent='Импорт остатков не выполнен: '+(e?.message||String(e))+' Старые остатки не изменены.';toast('Не удалось импортировать остатки')}finally{btn.disabled=false;btn.textContent='Импортировать остатки'}
 });
