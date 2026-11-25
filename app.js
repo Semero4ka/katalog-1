@@ -61,13 +61,15 @@ async function init(){
 function available(p){return p.stockTotal===null||p.stockTotal===undefined?null:Math.max(0,Number(p.stockTotal)-reservedFor(p.id))}
 function orderReservesStock(o){
  if(o.reserves===false)return false;
- if(o.status!=='Завершён')return true;
- // Completed orders already represented in the most recent imported stock snapshot
- // must not be deducted a second time. Orders completed after that snapshot still reserve stock.
+ // A stock import is a full snapshot: orders already present at that moment
+ // are reflected in the imported quantities and must not be deducted again.
  const accountedAt=Number(o.stockAccountedAt)||0;
  if(lastStockImportAt&&accountedAt>=lastStockImportAt)return false;
- const completedAt=Number(o.completedAt)||Date.parse(o.completedAt||'')||Date.parse(o.created||'')||0;
- if(lastStockImportAt&&completedAt<=lastStockImportAt)return false;
+ // Legacy orders may not have an accounting marker. Their creation time is
+ // enough to tell whether they predate the current stock snapshot. A later
+ // status change updates reservationUpdatedAt and makes them reserve again.
+ const activityAt=Number(o.reservationUpdatedAt)||Date.parse(o.created||'')||0;
+ if(lastStockImportAt&&activityAt<=lastStockImportAt)return false;
  return true;
 }
 function reservedFor(id){let n=Number(cart[id]||0);for(const o of orders){if(orderReservesStock(o)){for(const it of o.items||[])if(it.productId===id)n+=Number(it.qty||0)}}return n}
@@ -166,7 +168,7 @@ function renderOrders(){const root=$('#ordersList');root.innerHTML='';if(!orders
  const btn=(label,cls,fn)=>{const b=document.createElement('button');b.textContent=label;b.className=cls;b.addEventListener('click',fn);actions.append(b)};
  btn('Открыть накладную','primary',()=>openInvoice(o.id));btn(o.status==='Завершён'?'Вернуть в работу':'Завершить', 'secondary',()=>toggleOrder(o.id));btn('Удалить заказ','danger',()=>deleteOrder(o.id));
  card.append(head,actions);root.append(card)})}
-async function toggleOrder(id){const o=orders.find(x=>x.id===id);if(!o)return;if(o.status==='Завершён'){o.status='Новый';delete o.completedAt;delete o.stockAccountedAt;}else{o.status='Завершён';o.completedAt=Date.now();delete o.stockAccountedAt;}await put('orders',o);orders=await all('orders');renderAll();toast('Статус заказа обновлён')}
+async function toggleOrder(id){const o=orders.find(x=>x.id===id);if(!o)return;const changedAt=Date.now();if(o.status==='Завершён'){o.status='Новый';delete o.completedAt;}else{o.status='Завершён';o.completedAt=changedAt;}delete o.stockAccountedAt;o.reservationUpdatedAt=changedAt;await put('orders',o);orders=await all('orders');renderAll();toast('Статус заказа обновлён')}
 async function deleteOrder(id){const o=orders.find(x=>x.id===id);if(!o)return;if(!confirm(`Удалить ${id}? Зарезервированное количество этого заказа будет освобождено.`))return;await del('orders',id);orders=await all('orders');renderAll();toast('Заказ удалён, резерв освобождён')}
 function openModal(html){$('#modalContent').innerHTML=html;$('#modal').classList.remove('hidden')}
 function closeModal(){$('#modal').classList.add('hidden');$('#modalContent').innerHTML='';if(modalPhotoUrl){URL.revokeObjectURL(modalPhotoUrl);modalPhotoUrl=null}}
@@ -328,7 +330,7 @@ $('#importStock').addEventListener('click',async()=>{
   const updatedById=new Map(updated.map(p=>[String(p.id),p]));
   for(const {product,item,mode} of assignments){const p=updatedById.get(String(product.id));p.stockTotal=item.qty;p.stockName=item.name;p.stockMatch=item.qtyEmpty?'matched_empty':mode==='exact'?'matched':'matched_normalized'}
   const importedAt=Date.now();
-  await new Promise((resolve,reject)=>{const t=db.transaction(['products','state','orders'],'readwrite');const store=t.objectStore('products');store.clear();updated.forEach(p=>store.put(p));t.objectStore('state').put({key:'lastStockImportAt',value:importedAt});const orderStore=t.objectStore('orders');const cursorRequest=orderStore.openCursor();cursorRequest.onsuccess=()=>{const cursor=cursorRequest.result;if(!cursor)return;const order=cursor.value;if(order.status==='Завершён'){order.stockAccountedAt=importedAt;cursor.update(order);}cursor.continue();};t.oncomplete=resolve;t.onerror=()=>reject(t.error);t.onabort=()=>reject(t.error||new Error('Операция замены остатков отменена'))});
+  await new Promise((resolve,reject)=>{const t=db.transaction(['products','state','orders'],'readwrite');const store=t.objectStore('products');store.clear();updated.forEach(p=>store.put(p));t.objectStore('state').put({key:'lastStockImportAt',value:importedAt});const orderStore=t.objectStore('orders');const cursorRequest=orderStore.openCursor();cursorRequest.onsuccess=()=>{const cursor=cursorRequest.result;if(!cursor)return;const order=cursor.value;order.stockAccountedAt=importedAt;cursor.update(order);cursor.continue();};t.oncomplete=resolve;t.onerror=()=>reject(t.error);t.onabort=()=>reject(t.error||new Error('Операция замены остатков отменена'))});
   lastStockImportAt=importedAt;products=await all('products');orders=await all('orders');renderAll();
   const ignoredAmbiguous=ambiguousRows.length-positiveAmbiguous.length,ignoredDuplicates=duplicateItems.length-positiveDuplicates.length;
   $('#importStatus').textContent=`Остатки обновлены из файла «${f.name}». Использован столбец «Итого». Совпало: ${matched} (точных ${matchedExact}, нормализованных ${matchedNormalized}); проигнорировано строк, которых нет в прайсе/каталоге: ${unmatched}; неоднозначных строк с нулевым количеством пропущено: ${ignoredAmbiguous}; повторных строк с нулевым количеством пропущено: ${ignoredDuplicates}; пустых значений «Итого» установлено в 0: ${emptyQty}; пропущено заголовков категорий: ${report.skippedGroups}. Товары каталога, отсутствующие в файле остатков, получили остаток 0.`;
